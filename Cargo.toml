@@ -1,0 +1,20 @@
+[package]
+name = "custom_file_crawler"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "../custom_file_crawler/src/lib.rs"
+name = "custom_file_crawler"
+
+[dependencies]
+regex="1.11.2"
+anyhow = "1.0.99"
+tokio = { version = "1.47.1", features = ["fs", "full"] }
+async-recursion = "1.1.1"
+
+[features]
+
+default=[]
+
+dont_keep_going=[]
