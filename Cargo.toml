@@ -3,15 +3,17 @@ name = "custom_file_crawler"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-path = "../custom_file_crawler/src/lib.rs"
-name = "custom_file_crawler"
+[[test]]
+name = "async"
+path = "tests/async.rs"
+
 
 [dependencies]
 regex="1.11.2"
 anyhow = "1.0.99"
-tokio = { version = "1.47.1", features = ["fs", "full"] }
-async-recursion = "1.1.1"
+tokio = { version = "1.47.1", features = ["fs","full"] }
+rayon="1.11.0"
+#async-recursion = "1.1.1"
 
 [features]
 
