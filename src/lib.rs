@@ -1,46 +1,59 @@
-//many parts are also found in the other two files!!
-
-
+pub use builder::Crawler;
+pub use builder::marker::{Async, NonAsync};
 pub mod builder {
-    use std::collections::HashSet;
-    use std::convert::Infallible;
-    use std::error::Error;
+    use crate::builder::internal::async_run;
+    use crate::builder::marker::{Async, NonAsync};
+    use regex::Regex;
+    use std::fmt::Display;
+    use std::fs::DirEntry;
     use std::marker::PhantomData;
     use std::path::{Path, PathBuf};
-    use regex::Regex;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
     use tokio::task::JoinSet;
-    use crate::async_recursive::for_every_file;
-    use crate::builder::marker::{Async, NonAsync};
 
     pub mod marker {
+        #[derive(Default, Copy, Clone, Debug)]
+
         pub struct NonAsync;
+        #[derive(Default, Copy, Clone, Debug)]
         pub struct Async;
     }
-    #[derive(Debug, Default)]
-    pub struct Crawler<'a, M> {
-        start_dir: StartDir,
-        file_regex: Option<Regex>,
-        folder_regex: Option<Regex>,
-        max_depth: usize,
-        phantom: PhantomData<M>,
-    }
 
-    #[derive(Debug, Default)]
+    #[derive(Default, Clone, Debug)]
     enum StartDir {
         #[default]
         Current,
-        Custom(PathBuf)
+        Custom(PathBuf),
+    }
+
+    impl StartDir {
+        fn get_custom_dir(&self) -> &Path {
+            match self {
+                StartDir::Custom(path) => path,
+                StartDir::Current => unreachable!("Never this variant during the recursive calls"),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct Crawler<M> {
+        start_dir: StartDir,
+        file_regex: Option<Regex>,
+        folder_regex: Option<Regex>,
+        max_depth: Option<u32>,
+        phantom: PhantomData<M>,
     }
 
     impl<M> Crawler<M> {
         pub fn start_dir<P: AsRef<Path>>(self, path: P) -> Self {
-            fn inner(crawler: Crawler<M>, path: &Path) -> Crawler<M> {
+            fn inner<M>(crawler: Crawler<M>, path: &Path) -> Crawler<M> {
                 Crawler {
                     start_dir: StartDir::Custom(path.to_path_buf()),
                     ..crawler
                 }
             }
-            inner(self, path.as_ref())
+            inner::<M>(self, path.as_ref())
         }
         pub fn file_regex(self, regex: &str) -> Self {
             Self {
@@ -48,7 +61,7 @@ pub mod builder {
                     Ok(re) => Some(re),
                     Err(e) => panic!("Error compiling file regex: {}", e),
                 },
-                    ..self
+                ..self
             }
         }
         pub fn folder_regex(self, regex: &str) -> Self {
@@ -69,8 +82,22 @@ pub mod builder {
                 ..Self::default()
             }
         }
-        pub fn run(self, action: impl FnMut(std::path::PathBuf)) {
+        pub fn run(self, action: impl FnMut(PathBuf)) -> Result<(), std::io::Error> {
+            use rayon::prelude::*;
+            let start_dir = match self.start_dir {
+                StartDir::Custom(path) => path,
+                StartDir::Current => match std::env::current_dir() {
+                    Ok(path) => path,
+                    Err(e) => panic!("Could not resolve current directory: {}", e),
+                },
+            };
+            let entries = std::fs::read_dir(&start_dir)?;
 
+            for entry in entries.collect::<Vec<_>>().iter() {
+                
+            }
+
+            Ok(())
         }
     }
     impl Crawler<Async> {
@@ -80,48 +107,126 @@ pub mod builder {
                 ..Self::default()
             }
         }
-    pub async fn run<Fun, Fut>(self,action: Fun) -> Result<(), Box<dyn Error>>
-    where
-        Fun: Fn(PathBuf) -> Fut + Send + 'static + Clone,
-        Fut: Future<Output=Result<(), Box<dyn Error>>>,
-    {
-        let start_dir = match self.start_dir {
-            StartDir::Custom(path) => path,
-            StartDir::Current => std::env::current_dir()?,
-        };
-        let entries = tokio::fs::read_dir(&start_dir).await?;
+        pub async fn run<Fun, Fut, E>(self, action: Fun) -> Result<(), std::io::Error>
+        where
+            E: Send + 'static + Display,
+            Fun: Fn(PathBuf) -> Fut + Send + 'static + Clone,
+            Fut: Future<Output = Result<(), E>> + Send + 'static,
+        {
+            let start_dir = match self.start_dir {
+                StartDir::Custom(path) => path,
+                StartDir::Current => match std::env::current_dir() {
+                    Ok(path) => path,
+                    Err(e) => panic!("Could not resolve current directory: {}", e),
+                },
+            };
+            let entries = tokio::fs::read_dir(&start_dir).await?;
 
-        let mut tasks=JoinSet::new();
+            let action_tasks: Arc<RwLock<JoinSet<Result<(), E>>>> =
+                Arc::new(RwLock::new(JoinSet::new()));
+            let recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>> =
+                Arc::new(RwLock::new(JoinSet::new()));
 
-        loop {
-            match entries.next_entry().await {
+            recursion_tasks.clone().write().await.spawn(async_run(
+                recursion_tasks.clone(),
+                action_tasks.clone(),
+                action,
+                Self {
+                    //this is the start of the invariant get_custom_dir() relies on through the whole execution
+                    start_dir: StartDir::Custom(start_dir),
+                    ..self
+                },
+            ));
+            /*while let Some(task) = recursion_tasks.write().await.join_next().await {
+                match task {
+                    Err(e) => panic!("A panic occurred during task execution: {}", e),
+                    Ok(result) => result?,
+                };
+            }*/
 
-                Ok(entry_opt) => {
-                    if let Some(entry) = entry_opt {
+            loop {
+                let mut lock = action_tasks.write().await;
+                let task = match lock.join_next().await {
+                    Some(result) => result?,
+                    None => break,
+                };
+                match task {
+                    Err(e) => panic!("A panic occurred during task execution: {}", e),
+                    Ok(_) => continue,
+                }
+            }
+
+            while let Some(task) = action_tasks.write().await.join_next().await {
+                dbg!("Action task iteration");
+                match task {
+                    Err(e) => panic!("A panic occurred during task execution: {}", e),
+                    Ok(result) => match result {
+                        Ok(_) => {}
+                        Err(e) => panic!("An error occurred during execution: {}", e),
+                    },
+                };
+            }
+            Ok(())
+        }
+    }
+    pub(in super::builder) mod internal {
+        use crate::builder::Crawler;
+        use crate::builder::marker::Async;
+        use std::fmt::Display;
+        use std::marker::PhantomData;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        use tokio::task::JoinSet;
+
+        pub(in super::super::builder) fn async_run<Fun, Fut, E>(
+            recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>>,
+            action_tasks: Arc<RwLock<JoinSet<Result<(), E>>>>,
+            action: Fun,
+            config: Crawler<Async>,
+        ) -> impl Future<Output = Result<(), std::io::Error>> + Send
+        where
+            E: Send + 'static + Display,
+            Fun: Fn(PathBuf) -> Fut + Send + 'static + Clone,
+            Fut: Future<Output = Result<(), E>> + Send + 'static,
+        {
+            async move {
+                //here, the Custom(_) invariant is important
+                let mut entries = tokio::fs::read_dir(&config.start_dir.get_custom_dir()).await?;
+
+                loop {
+                    if let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();
-                        if path.is_dir() {
-                            //is it possible to return the result??
-                            let cloned_action = action.clone();
-                            tasks.spawn(for_every_file(path, cloned_action));
+                        if path.is_dir() && !matches!(config.max_depth, Some(0)) {
+                            let config = Crawler {
+                                start_dir: super::StartDir::Custom(path),
+                                max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
+                                folder_regex: config.folder_regex.clone(),
+                                file_regex: config.file_regex.clone(),
+                                phantom: PhantomData,
+                            };
+                            //explicit drop to show that the only task error can be a panic (as of tokio 1.47.1)
+                            drop(
+                                recursion_tasks
+                                    .write()
+                                    .await
+                                    .spawn(async_run::<Fun, Fut, E>(
+                                        recursion_tasks.clone(),
+                                        action_tasks.clone(),
+                                        action.clone(),
+                                        config,
+                                    )),
+                            )
                         } else {
-                            //same
-                            let cloned_action=action.clone();
-
-                            tasks.spawn(cloned_action(path))
+                            //same as above
+                            drop(action_tasks.write().await.spawn(action.clone()(path)))
                         }
                         //saving the else branch
                         continue;
                     }
-                    break;
-                }
-                Err(_e) => {
-                    //#[cfg(feature = "dont_keep_going")]
-                    //return Err(anyhow::Error::from(_e));
+                    break Ok(());
                 }
             }
-        }
-        while let Some(task)= tasks.join_next() {
-
         }
     }
 }
@@ -146,9 +251,7 @@ pub mod single_threaded {
         let entries_result = std::fs::read_dir(&start_dir);
         let entries: ReadDir = match entries_result {
             Ok(entries) => entries,
-            Err(error) => {
-                return Err(anyhow::Error::from(error))
-            },
+            Err(error) => return Err(anyhow::Error::from(error)),
         };
 
         for entry in entries.into_iter().filter_map(|entry| entry.ok()) {
@@ -262,16 +365,13 @@ pub mod multi_threaded {
 pub mod async_recursive {
     use std::path::{Path, PathBuf};
 
-    #[async_recursion::async_recursion]
-    pub async fn for_every_file<Fun, Fut>(
-        start_dir: impl AsRef<Path> + Send + 'static,
-        action: Fun
-    )
+    /*#[async_recursion::async_recursion]
+    pub async fn for_every_file<Fun, Fut>(start_dir: impl AsRef<Path> + Send + 'static, action: Fun)
     where
         Fun: Fn(PathBuf) -> Fut + Send + 'static + Clone,
         Fut: Future<Output: Send + 'static> + Send + 'static,
         //<F as Future>::Output: Send + 'static,
-       // <F as AsyncFn(PathBuf) >::Output: Send,
+        // <F as AsyncFn(PathBuf) >::Output: Send,
     {
         let start_dir = start_dir.as_ref().to_path_buf();
         #[cfg(feature = "verify")]
@@ -287,24 +387,24 @@ pub mod async_recursive {
             Err(_) => return (),
         };
 
-
         loop {
             match entries.next_entry().await {
-
                 Ok(entry_opt) => {
                     if let Some(entry) = entry_opt {
                         let path = entry.path();
                         if path.is_dir() {
                             //is it possible to return the result??
                             let cloned_action = action.clone();
-                            tokio::spawn(for_every_file(path, cloned_action)).await.unwrap();
+                            tokio::spawn(for_every_file(path, cloned_action))
+                                .await
+                                .unwrap();
                         } else {
                             //same
-                            let cloned_action=action.clone();
+                            let cloned_action = action.clone();
 
-                            tokio::spawn(async move {
-                                cloned_action(path).await
-                            }).await.unwrap();
+                            tokio::spawn(async move { cloned_action(path).await })
+                                .await
+                                .unwrap();
                         }
                         //saving the else branch
                         continue;
@@ -317,9 +417,7 @@ pub mod async_recursive {
                 }
             }
         }
-    }
+    }*/
 }
 
-pub mod async_non_recursive {
-
-}
+pub mod async_non_recursive {}
