@@ -74,6 +74,13 @@ use std::error::Error;
                 ..self
             }
         }
+        pub fn search_depth(self, depth: u32) -> Self {
+            Self {
+                max_depth: Some(depth),
+                ..self
+            }
+        }
+
     }
 
     impl Crawler<NonAsync>
