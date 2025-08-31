@@ -10,11 +10,12 @@ path = "tests/async.rs"
 
 [dependencies]
 regex="1.11.2"
-anyhow = "1.0.99"
+anyhow = { version = "1.0.99", optional = true }
 tokio = { version = "1.47.1", features = ["fs","full"] }
 rayon="1.11.0"
-#async-recursion = "1.1.1"
 
 [features]
 
 default=[]
+
+legacy=["anyhow/default"]
