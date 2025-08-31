@@ -1,17 +1,30 @@
-pub use builder::Crawler;
-pub use builder::marker::{Async, NonAsync};
-
+pub mod prelude {
+    pub use crate::builder::{Crawler, marker::{Async, NonAsync}};
+    pub use tokio;
+    #[cfg(feature = "legacy")]
+    pub use anyhow;
+    #[cfg(feature = "legacy")]
+    pub use crate::legacy::single_threaded::for_every_file;
+}
 pub mod builder {
     use regex::Regex;
-use std::error::Error;
-    use std::fmt::{Debug};
-    use crate::builder::internal::{async_run, par_run};
-    use crate::builder::marker::{Async, NonAsync};
-    use std::marker::PhantomData;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-    use tokio::task::JoinSet;
+    use std::{
+        error::Error,
+        fmt::{Debug},
+        marker::PhantomData,
+        path::{Path, PathBuf},
+        sync::Arc
+    };
+    use crate::{
+        builder::{
+            internal::{async_run, par_run},
+            marker::{Async, NonAsync}
+        }
+    };
+    use tokio::{
+        sync::RwLock,
+        task::JoinSet
+    };
 
     pub mod marker {
         #[derive(Default, Copy, Clone, Debug)]
@@ -243,7 +256,7 @@ use std::error::Error;
         use std::sync::Arc;
         use tokio::sync::RwLock;
         use tokio::task::JoinSet;
-        use crate::NonAsync;
+        use crate::builder::NonAsync;
 
         pub(in super::super::builder) fn async_run<Fun, Fut, E>(
             recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>>,
@@ -301,8 +314,7 @@ use std::error::Error;
     }
 }
 
-pub use anyhow;
-
+#[cfg(feature = "legacy")]
 pub mod legacy {
     pub mod single_threaded {
         use std::fs::ReadDir;
