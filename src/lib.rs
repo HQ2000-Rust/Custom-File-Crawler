@@ -193,6 +193,7 @@ use std::error::Error;
                 Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>)
             };
 
+                //could optimize that later with .filter()
             entries.into_iter().par_bridge().map(|result| {
 
                 let path = match result {
@@ -200,6 +201,7 @@ use std::error::Error;
                     Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>)
                 };
                 if path.is_dir() && !matches!(config.max_depth, Some(0)) {
+                    if let Some(regex) = config.folder_regex.clone() && regex.is_match(&path.to_string_lossy()) {
                     let config = Crawler {
                         start_dir: super::StartDir::Custom(path),
                         max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
@@ -209,11 +211,14 @@ use std::error::Error;
                     };
                     par_run(action.clone(), config.clone())?;
                 }
+            }
                 else {
-                    match action.clone()(path) {
-                        Ok(_) => {},
-                        Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>)
-                    };
+                    if let Some(regex) = config.file_regex.clone() && regex.is_match(&path.to_string_lossy()) {
+                        match action.clone()(path) {
+                            Ok(_) => {},
+                            Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>)
+                        };
+                    }
                 }
                 Ok(())
             }).collect::<Result<(), Box<dyn Error + Send>>>()?;
@@ -252,28 +257,32 @@ use std::error::Error;
                     if let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();
                         if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                            let config = Crawler {
-                                start_dir: super::StartDir::Custom(path),
-                                max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
-                                folder_regex: config.folder_regex.clone(),
-                                file_regex: config.file_regex.clone(),
-                                phantom: PhantomData,
-                            };
-                            //explicit drop to show that the only task error can be a panic (as of tokio 1.47.1)
-                            drop(
-                                recursion_tasks
-                                    .write()
-                                    .await
-                                    .spawn(async_run::<Fun, Fut, E>(
-                                        recursion_tasks.clone(),
-                                        action_tasks.clone(),
-                                        action.clone(),
-                                        config,
-                                    )),
-                            )
+                            if let Some(regex) = config.folder_regex.clone() && regex.is_match(&path.to_string_lossy()) {
+                                let config = Crawler {
+                                    start_dir: super::StartDir::Custom(path),
+                                    max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
+                                    folder_regex: config.folder_regex.clone(),
+                                    file_regex: config.file_regex.clone(),
+                                    phantom: PhantomData,
+                                };
+                                //explicit drop to show that the only task error can be a panic (as of tokio 1.47.1)
+                                drop(
+                                    recursion_tasks
+                                        .write()
+                                        .await
+                                        .spawn(async_run::<Fun, Fut, E>(
+                                            recursion_tasks.clone(),
+                                            action_tasks.clone(),
+                                            action.clone(),
+                                            config,
+                                        )),
+                                );
+                            }
                         } else {
-                            //same as above
-                            drop(action_tasks.write().await.spawn(action.clone()(path)))
+                            if let Some(regex) = config.file_regex.clone() && regex.is_match(&path.to_string_lossy()) {
+                                //same as above
+                                drop(action_tasks.write().await.spawn(action.clone()(path)));
+                            }
                         }
                         //saving the else branch
                         continue;
