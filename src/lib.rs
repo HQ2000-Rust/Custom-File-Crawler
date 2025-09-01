@@ -1,37 +1,41 @@
 pub mod prelude {
-    pub use crate::builder::{Crawler, marker::{Async, NonAsync}};
-    pub use tokio;
-    #[cfg(feature = "legacy")]
-    pub use anyhow;
+    pub use crate::builder::{
+        Crawler,
+        marker::{Async, NonAsync},
+    };
     #[cfg(feature = "legacy")]
     pub use crate::legacy::single_threaded::for_every_file;
+    #[cfg(feature = "legacy")]
+    pub use anyhow;
+    pub use tokio;
 }
 pub mod builder {
+    use crate::builder::{
+        internal::{async_run, par_run},
+        marker::{Async, NonAsync},
+    };
     use regex::Regex;
     use std::{
         error::Error,
-        fmt::{Debug},
+        fmt::Debug,
         marker::PhantomData,
         path::{Path, PathBuf},
-        sync::Arc
+        sync::Arc,
     };
-    use crate::{
-        builder::{
-            internal::{async_run, par_run},
-            marker::{Async, NonAsync}
-        }
-    };
-    use tokio::{
-        sync::RwLock,
-        task::JoinSet
-    };
+    use tokio::{sync::RwLock, task::JoinSet};
 
     pub mod marker {
         #[derive(Default, Copy, Clone, Debug)]
-
         pub struct NonAsync;
+
         #[derive(Default, Copy, Clone, Debug)]
         pub struct Async;
+
+        #[derive(Default, Copy, Clone, Debug)]
+        pub struct NoContext;
+
+        #[derive(Default, Copy, Clone, Debug)]
+        pub struct Context;
     }
 
     #[derive(Default, Clone, Debug)]
@@ -93,11 +97,9 @@ pub mod builder {
                 ..self
             }
         }
-
     }
 
-    impl Crawler<NonAsync>
-    {
+    impl Crawler<NonAsync> {
         pub fn new() -> Self {
             Self {
                 //?
@@ -106,10 +108,9 @@ pub mod builder {
         }
         pub fn run<A, E>(self, action: A) -> Result<(), Box<dyn Error + Send + 'static>>
         where
-        A: FnMut(PathBuf) -> Result<(),E> + Clone + Send + Sync,
-        E: Error + Send + 'static,
+            A: FnMut(PathBuf) -> Result<(), E> + Clone + Send + Sync,
+            E: Error + Send + 'static,
         {
-
             let start_dir = match self.start_dir {
                 StartDir::Custom(path) => path,
                 StartDir::Current => match std::env::current_dir() {
@@ -118,10 +119,13 @@ pub mod builder {
                 },
             };
 
-            par_run::<A, E>(action, Self {
-                start_dir: StartDir::Custom(start_dir),
-                ..self
-            })?;
+            par_run::<A, E>(
+                action,
+                Self {
+                    start_dir: StartDir::Custom(start_dir),
+                    ..self
+                },
+            )?;
 
             Ok(())
         }
@@ -133,7 +137,10 @@ pub mod builder {
                 ..Self::default()
             }
         }
-        pub async fn run<Fun, Fut, E>(self, action: Fun) -> Result<(), Box<dyn Error + Send + 'static>>
+        pub async fn run<Fun, Fut, E>(
+            self,
+            action: Fun,
+        ) -> Result<(), Box<dyn Error + Send + 'static>>
         where
             E: Send + Error + 'static,
             Fun: Fn(PathBuf) -> Fut + Send + 'static + Clone,
@@ -200,63 +207,84 @@ pub mod builder {
     }
     pub(in super::builder) mod internal {
         //should - like the async version - only called with a Custom(DIR) variant!
+        pub(super) mod regex {
+            use crate::builder::Crawler;
 
-            pub(in super::super::builder) fn par_run<A, E>(action: A ,config: Crawler<NonAsync>) -> Result<(), Box<dyn Error + Send + 'static>>
-            where
-                A: FnMut(PathBuf) -> Result<(),E> + Clone + Send + Sync,
-                E: Error + Send + 'static,
-            {
-                use rayon::prelude::*;
-                //'?' doesn't work here (because of the trait bounds I guess)
-            let entries = match std::fs::read_dir(&config.start_dir.get_custom_dir()) {
-                Ok(entry) => entry,
-                Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>)
-            };
-
-                //could optimize that later with .filter()
-            entries.into_iter().par_bridge().map(|result| {
-
-                let path = match result {
-                    Ok(entry) => entry.path(),
-                    Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>)
-                };
-                if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                    if let Some(regex) = config.folder_regex.clone() && regex.is_match(&path.to_string_lossy()) {
-                    let config = Crawler {
-                        start_dir: super::StartDir::Custom(path),
-                        max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
-                        folder_regex: config.folder_regex.clone(),
-                        file_regex: config.file_regex.clone(),
-                        phantom: PhantomData,
-                    };
-                    par_run(action.clone(), config.clone())?;
+            impl<M> Crawler<M> {
+                pub(in super::super) fn validate_folder_regex(&self, str: &str) -> bool {
+                    self.folder_regex
+                        .as_ref()
+                        .map_or(true, |regex| regex.is_match(str))
+                }
+                pub(in super::super) fn validate_file_regex(&self, str: &str) -> bool {
+                    self.file_regex
+                        .as_ref()
+                        .map_or(true, |regex| regex.is_match(str))
                 }
             }
-                else {
-                    if let Some(regex) = config.file_regex.clone() && regex.is_match(&path.to_string_lossy()) {
-                        match action.clone()(path) {
-                            Ok(_) => {},
-                            Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>)
-                        };
+        }
+        pub(in super::super::builder) fn par_run<A, E>(
+            action: A,
+            config: Crawler<NonAsync>,
+        ) -> Result<(), Box<dyn Error + Send + 'static>>
+        where
+            A: FnMut(PathBuf) -> Result<(), E> + Clone + Send + Sync,
+            E: Error + Send + 'static,
+        {
+            use rayon::prelude::*;
+            //'?' doesn't work here (because of the trait bounds I guess)
+            let entries = match std::fs::read_dir(&config.start_dir.get_custom_dir()) {
+                Ok(entry) => entry,
+                Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>),
+            };
+            //could optimize that later with .filter()
+            entries
+                .into_iter()
+                .par_bridge()
+                .inspect(|entry| {})
+                .map(|result| {
+                    let path = match result {
+                        Ok(entry) => entry.path(),
+                        Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>),
+                    };
+                    if path.is_dir() && !matches!(config.max_depth, Some(0)) {
+                        if config.validate_folder_regex(&path.to_string_lossy()) {
+                            let config = Crawler {
+                                start_dir: super::StartDir::Custom(path),
+                                max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
+                                folder_regex: config.folder_regex.clone(),
+                                file_regex: config.file_regex.clone(),
+                                phantom: PhantomData,
+                            };
+                            par_run(action.clone(), config.clone())?;
+                        }
+                    } else {
+
+                            if config.validate_file_regex(&path.to_string_lossy()) {
+                                match action.clone()(path) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        return Err(Box::new(e) as Box<dyn Error + Send + 'static>);
+                                    }
+                                };
+                            }
                     }
-                }
-                Ok(())
-            }).collect::<Result<(), Box<dyn Error + Send>>>()?;
+                    Ok(())
+                })
+                .collect::<Result<(), Box<dyn Error + Send>>>()?;
             Ok(())
-
-
         }
 
-            use std::error::Error;
-            use crate::builder::Crawler;
+        use crate::builder::Crawler;
+        use crate::builder::NonAsync;
         use crate::builder::marker::Async;
-        use std::fmt::Display;
+        use std::error::Error;
         use std::marker::PhantomData;
+        use std::ops::Deref;
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::RwLock;
         use tokio::task::JoinSet;
-        use crate::builder::NonAsync;
 
         pub(in super::super::builder) fn async_run<Fun, Fut, E>(
             recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>>,
@@ -277,7 +305,7 @@ pub mod builder {
                     if let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();
                         if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                            if let Some(regex) = config.folder_regex.clone() && regex.is_match(&path.to_string_lossy()) {
+                            if dbg!(config.validate_folder_regex(&path.to_string_lossy())) {
                                 let config = Crawler {
                                     start_dir: super::StartDir::Custom(path),
                                     max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
@@ -286,20 +314,17 @@ pub mod builder {
                                     phantom: PhantomData,
                                 };
                                 //explicit drop to show that the only task error can be a panic (as of tokio 1.47.1)
-                                drop(
-                                    recursion_tasks
-                                        .write()
-                                        .await
-                                        .spawn(async_run::<Fun, Fut, E>(
-                                            recursion_tasks.clone(),
-                                            action_tasks.clone(),
-                                            action.clone(),
-                                            config,
-                                        )),
-                                );
+                                drop(recursion_tasks.write().await.spawn(
+                                    async_run::<Fun, Fut, E>(
+                                        recursion_tasks.clone(),
+                                        action_tasks.clone(),
+                                        action.clone(),
+                                        config,
+                                    ),
+                                ));
                             }
                         } else {
-                            if let Some(regex) = config.file_regex.clone() && regex.is_match(&path.to_string_lossy()) {
+                            if config.validate_file_regex(&path.to_string_lossy()) {
                                 //same as above
                                 drop(action_tasks.write().await.spawn(action.clone()(path)));
                             }
@@ -332,15 +357,9 @@ pub mod legacy {
 
             for entry in entries.into_iter().filter_map(|entry| entry.ok()) {
                 if entry.path().is_dir() {
-                    #[cfg(feature = "dont_keep_going")]
                     for_every_file(entry.path(), action.clone())?;
-                    #[cfg(not(feature = "dont_keep_going"))]
-                    let _ = for_every_file(entry.path(), action.clone());
                 } else {
-                    #[cfg(feature = "dont_keep_going")]
                     action(entry.path())?;
-                    #[cfg(not(feature = "dont_keep_going"))]
-                    let _ = action(entry.path());
                 }
             }
 
