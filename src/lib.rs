@@ -1,3 +1,5 @@
+extern crate alloc;
+
 pub mod prelude {
     pub use crate::builder::{
         Crawler,
@@ -16,15 +18,20 @@ pub mod builder {
         internal::{async_run, par_run},
         marker::{Async, NonAsync},
     };
+    use alloc::boxed::Box;
+    use core::error::Error;
+    use core::future::Future;
+    use core::marker::Send;
     use regex::Regex;
     use std::{
-        error::Error,
         fmt::Debug,
         marker::PhantomData,
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use tokio::{sync::RwLock, task::JoinSet};
+    use std::pin::Pin;
+    use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
+    use crate::builder::internal::utils::box_err;
 
     pub mod marker {
         #[derive(Default, Copy, Clone, Debug)]
@@ -44,18 +51,8 @@ pub mod builder {
         Custom(PathBuf),
     }
 
-    impl StartDir {
-        fn get_custom_dir(&self) -> &Path {
-            match self {
-                StartDir::Custom(path) => path,
-                StartDir::Current => unreachable!("Never this variant during the recursive calls"),
-            }
-        }
-    }
-
     #[derive(Debug, Clone, Default)]
-    pub struct Crawler<A, C>
-    {
+    pub struct Crawler<A, C> {
         start_dir: StartDir,
         file_regex: Option<Regex>,
         folder_regex: Option<Regex>,
@@ -108,7 +105,7 @@ pub mod builder {
                 },
             };
 
-            let result=par_run::<A, E, C>(
+            let result = par_run::<A, E, C>(
                 action,
                 Config {
                     start_dir,
@@ -118,9 +115,7 @@ pub mod builder {
                     context: Arc::new(self.context),
                 },
             )?;
-            Ok(
-            Arc::into_inner(result).expect("Unique now?")
-            )
+            Ok(Arc::into_inner(result).expect("Every other Arc should have been dropped by now"))
         }
     }
     impl<C> Crawler<Async, C>
@@ -151,6 +146,20 @@ pub mod builder {
             Fun: Fn(Arc<C>, PathBuf) -> Fut + Send + 'static + Clone,
             Fut: Future<Output = Result<(), E>> + Send + 'static,
         {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+                Pin<Box<dyn Future<Output = Result<(),Box<dyn Error + Send + 'static>>> + Send>>,
+            >();
+            let worker_handle = tokio::spawn(
+                async move |mut rx: UnboundedReceiver<Pin<Box<dyn Future<Output=Result<(),Box<dyn Error + Send + 'static>>> + Send>>>| -> Result<(), Box<dyn Error + Send + 'static>> {
+                    while let Some(task) = rx.recv().await {
+                        task.await?;
+                    }
+
+                    Ok::<(), Box<dyn Error + Send + 'static>>(())
+                }(rx),
+            );
+            use tracing::info;
+            info!("starting crawler");
             let start_dir = match self.start_dir {
                 StartDir::Custom(path) => path,
                 StartDir::Current => match std::env::current_dir() {
@@ -158,11 +167,6 @@ pub mod builder {
                     Err(e) => panic!("Could not resolve current directory: {}", e),
                 },
             };
-
-            let action_tasks: Arc<RwLock<JoinSet<Result<(), E>>>> =
-                Arc::new(RwLock::new(JoinSet::new()));
-            let recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>> =
-                Arc::new(RwLock::new(JoinSet::new()));
 
             let config = Config {
                 //this is the start of the invariant get_custom_dir() relies on through the whole execution
@@ -173,47 +177,59 @@ pub mod builder {
                 file_regex: self.file_regex,
             };
 
-            recursion_tasks.clone().write().await.spawn(async_run(
-                recursion_tasks.clone(),
-                action_tasks.clone(),
-                action,
-                Config {
-                    context: Arc::clone(&config.context),
-                    ..config
-                },
-            ));
-            /*while let Some(task) = recursion_tasks.write().await.join_next().await {
-                match task {
-                    Err(e) => panic!("A panic occurred during task execution: {}", e),
-                    Ok(result) => result?,
-                };
-            }*/
+            {
+                /*let action_tasks: Arc<Mutex<JoinSet<Result<(), E>>>> =
+                    Arc::new(Mutex::new(JoinSet::new()));
+                let recursion_tasks: Arc<Mutex<JoinSet<Result<(), std::io::Error>>>> =
+                    Arc::new(Mutex::new(JoinSet::new()));*/
 
-            //this works, but the version above not :/
-            loop {
-                let mut lock = action_tasks.write().await;
-                let task = match lock.join_next().await {
-                    Some(result) => match result {
-                        Ok(result) => result,
-                        Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>),
+                info!("set up joinsets");
+                tx.send(async_run(
+                    tx.clone(),
+                    action,
+                    Config {
+                        context: Arc::clone(&config.context),
+                        ..config
                     },
-                    None => break,
-                };
-                match task {
-                    Err(e) => panic!("A panic occurred during task execution: {}", e),
-                    Ok(_) => continue,
+                )).map_err(box_err)?;
+                /*while let Some(task) = recursion_tasks.write().await.join_next().await {
+                    match task {
+                        Err(e) => panic!("A panic occurred during task execution: {}", e),
+                        Ok(result) => result?,
+                    };
+                }*/
+
+                //this works, but the version above not :/
+
+                /*loop {
+                    info!("loop (rt)");
+                    let task = match (*recursion_tasks).lock().unwrap().join_next() {
+                        Some(result) => match result {
+                            Ok(result) => result,
+                            Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>),
+                        },
+                        None => {
+                            info!("breaking out of the loop");
+                            break;
+                        }
+                    };
+                    match task {
+                        Err(e) => panic!("A panic occurred during task execution: {}", e),
+                        Ok(_) => continue,
+                    }
                 }
-            }
-
-            while let Some(task) = action_tasks.write().await.join_next().await {
-                dbg!("Action task iteration");
-                match task {
-                    Err(e) => panic!("A panic occurred during task execution: {}", e),
-                    Ok(result) => match result {
-                        Ok(_) => {}
-                        Err(e) => panic!("An error occurred during execution: {}", e),
-                    },
-                };
+                while let Some(task) = action_tasks.lock().unwrap().join_next().await {
+                    info!("action loop");
+                    match task {
+                        Err(e) => panic!("A panic occurred during task execution: {}", e),
+                        Ok(result) => match result {
+                            Ok(_) => {}
+                            Err(e) => panic!("An error occurred during execution: {}", e),
+                        },
+                    };
+                }*/
+                //JoinError and actual Error
+                worker_handle.await.map_err(box_err).unwrap()?;
             }
             Ok(Arc::into_inner(config.context).unwrap_or_else(|| {
                 unreachable!("Every other clone of this Arc should have been dropped by now")
@@ -221,8 +237,15 @@ pub mod builder {
         }
     }
     pub(in crate::builder) mod internal {
+        pub(crate) mod utils {
+            use std::error::Error;
+
+            pub(crate) fn box_err(error: impl Error + Send + 'static) -> Box<dyn Error + Send> {
+                Box::new(error)
+            }
+        }
         pub(in crate::builder) mod config {
-            use crate::builder::Crawler;
+            use crate::builder::{Crawler, StartDir};
             use std::path::PathBuf;
             use std::sync::Arc;
 
@@ -238,7 +261,11 @@ pub mod builder {
             impl<A, C: 'static> From<Crawler<A, C>> for Config<C> {
                 fn from(value: Crawler<A, C>) -> Self {
                     Self {
-                        start_dir: value.start_dir.get_custom_dir().to_path_buf(),
+                        start_dir: match value.start_dir {
+                            StartDir::Custom(path) => path,
+                            StartDir::Current => unreachable!("Ensure that this isn't the case"),
+                        }
+                        .to_path_buf(),
                         context: Arc::new(value.context),
                         file_regex: value.file_regex,
                         folder_regex: value.folder_regex,
@@ -309,7 +336,7 @@ pub mod builder {
         }
         pub(in crate::builder) fn par_run<A, E, C>(
             action: A,
-            config: Config<C>,//1
+            config: Config<C>, //1
         ) -> Result<Arc<C>, Box<dyn Error + Send + 'static>>
         where
             A: FnMut(Arc<C>, PathBuf) -> Result<(), E> + Clone + Send + Sync,
@@ -318,47 +345,31 @@ pub mod builder {
         {
             use rayon::prelude::*;
             //'?' doesn't work here (because of the non-trivial trait bound conversions)
-            let entries = match std::fs::read_dir(&config.start_dir) {
-                Ok(entry) => entry,
-                Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>),
-            };
+            let entries = std::fs::read_dir(&config.start_dir).map_err(box_err)?;
             //could optimize that later with .filter()
-            entries
-                .into_iter()
-                .par_bridge()
-                .drive_unindexed()
-                .map(|result| {
-                    let path = match result {
-                        Ok(entry) => entry.path(),
-                        Err(e) => return Err(Box::new(e) as Box<dyn Error + Send>),
-                    };
-                    if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                        if config.validate_folder_regex(&path.to_string_lossy()) {
-                            let config = Config {
-                                start_dir: path,
-                                max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
-                                folder_regex: config.folder_regex.clone(),
-                                file_regex: config.file_regex.clone(),
-                                context: Arc::clone(&config.context),
-                            };
-                            par_run(action.clone(), config)?;
-                            //N drop?
-                        }
-                    } else {
-                        if config.validate_file_regex(&path.to_string_lossy()) {
-                            match action.clone()(config.context.clone(), path) {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    //N2 can't be returned here
-                                    return Err(Box::new(e) as Box<dyn Error + Send + 'static>);
-                                }
-                            };
-                        }
+            entries.into_iter().par_bridge().try_for_each(|result| {
+                let path = result.map_err(box_err)?.path();
+                if path.is_dir() && !matches!(config.max_depth, Some(0)) {
+                    if config.validate_folder_regex(&path.to_string_lossy()) {
+                        let config = Config {
+                            start_dir: path,
+                            max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
+                            folder_regex: config.folder_regex.clone(),
+                            file_regex: config.file_regex.clone(),
+                            context: Arc::clone(&config.context),
+                        };
+                        par_run(action.clone(), config)?;
+                        //N drop?
                     }
-                    Ok(())
-                })
-                .collect::<Result<(), Box<dyn Error + Send>>>()?;
-        Ok(config.context)
+                } else {
+                    if config.validate_file_regex(&path.to_string_lossy()) {
+                        action.clone()(config.context.clone(), path).map_err(box_err)?;
+                    }
+                }
+                //just to be sure
+                Ok::<(), Box<dyn Error + Send>>(())
+            })?;
+            Ok(config.context)
         }
 
         use crate::builder::internal::config::Config;
@@ -366,31 +377,36 @@ pub mod builder {
         use ::regex::Regex;
         use std::error::Error;
         use std::path::{Path, PathBuf};
+        use std::pin::Pin;
         use std::sync::Arc;
-        use tokio::sync::RwLock;
-        use tokio::task::JoinSet;
+        use tokio::sync::mpsc::UnboundedSender;
+        use tracing::info;
+        use crate::builder::internal::utils::box_err;
 
         pub(in crate::builder) fn async_run<Fun, Fut, E, C>(
-            recursion_tasks: Arc<RwLock<JoinSet<Result<(), std::io::Error>>>>,
-            action_tasks: Arc<RwLock<JoinSet<Result<(), E>>>>,
+            worker: UnboundedSender<Pin<Box<dyn Future<Output = Result<(),Box<dyn Error + Send + 'static>>> + Send>>>,
             action: Fun,
             config: Config<C>,
-        ) -> impl Future<Output = Result<(), std::io::Error>> + Send
+        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error + Send>>> + Send>>
         where
             E: Send + 'static + Error,
             Fun: Fn(Arc<C>, PathBuf) -> Fut + Send + 'static + Clone,
             Fut: Future<Output = Result<(), E>> + Send + 'static,
-            C:  Send + Sync + 'static,
+            C: Send + Sync + 'static,
         {
-            async move {
+            info!("async run started!");
+            Box::pin( async move {
                 //here, the Custom(_) invariant is important
-                let mut entries = tokio::fs::read_dir(&config.start_dir).await?;
+                let mut entries = tokio::fs::read_dir(&config.start_dir).await.map_err(box_err)?;
 
                 loop {
-                    if let Some(entry) = entries.next_entry().await? {
+                    info!("async_run loop");
+                    if let Some(entry) = entries.next_entry().await.map_err(box_err)? {
+                        info!("entry: {:?}", entry);
                         let path = entry.path();
                         if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                            if dbg!(config.validate_folder_regex(&path.to_string_lossy())) {
+                            info!("dir: {}", path.display());
+                            if config.validate_folder_regex(&path.to_string_lossy()) {
                                 let config = Config {
                                     start_dir: path,
                                     max_depth: config.max_depth.and_then(|depth| Some(depth - 1)),
@@ -398,36 +414,36 @@ pub mod builder {
                                     file_regex: config.file_regex.clone(),
                                     folder_regex: config.folder_regex.clone(),
                                 };
-                                //explicit drop to show that the only task error can be a panic (as of tokio 1.47.1)
-                                drop(recursion_tasks.write().await.spawn(async_run::<
+                                info!("regex valid");
+                                worker.send(Box::pin(
+                                    async_run::<
                                     Fun,
                                     Fut,
                                     E,
                                     C,
                                 >(
-                                    recursion_tasks.clone(),
-                                    action_tasks.clone(),
+                                    worker.clone(),
                                     action.clone(),
                                     config,
-                                )));
+                                ))).map_err(box_err)?;
+                                info!("task spawned!");
                             }
                         } else {
+                            info!("File: {}", path.display());
                             if config.validate_file_regex(&path.to_string_lossy()) {
                                 //same as above
-                                drop(
-                                    action_tasks
-                                        .write()
-                                        .await
-                                        .spawn(action.clone()(config.context.clone(), path)),
-                                );
+
+                                    worker.send(Box::pin(action.clone()(Arc::clone(&config.context), path))).map_err(box_err)?;
+
                             }
                         }
                         //saving the else branch
                         continue;
                     }
+                    info!("async run finished!");
                     break Ok(());
                 }
-            }
+            })
         }
     }
 }
