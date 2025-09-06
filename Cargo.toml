@@ -2,20 +2,18 @@
 name = "custom_file_crawler"
 version = "0.1.0"
 edition = "2024"
-
-[[test]]
-name = "async"
-path = "tests/async.rs"
+keywords = ["async", "fs", "crawler", "tokio", "rayon"]
+categories = ["concurrency"]
+license = "MIT"
+license-file = "LICENSE"
 
 
 [dependencies]
 regex="1.11.2"
-anyhow = { version = "1.0.99", optional = true }
-tokio = { version = "1.47.1", features = ["fs","full"] }
+tokio = { version = "1.47.1", features = ["sync", "fs","rt"] }
 rayon="1.11.0"
+
 
 [features]
 
 default=[]
-
-legacy=["anyhow/default"]
