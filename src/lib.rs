@@ -1,24 +1,13 @@
-extern crate alloc;
-
-pub mod prelude {
-    pub use crate::builder::{
-        Crawler,
-        marker::{Async, NonAsync},
-    };
-    #[cfg(feature = "legacy")]
-    pub use crate::legacy::single_threaded::for_every_file;
-    #[cfg(feature = "legacy")]
-    pub use anyhow;
-    pub use tokio;
-}
+pub mod prelude;
 pub mod builder {
+
     use crate::builder::context::NoContext;
     use crate::builder::internal::config::Config;
+    use crate::builder::internal::utils::{box_err, Execute};
     use crate::builder::{
         internal::{async_run, par_run},
         marker::{Async, NonAsync},
     };
-    use alloc::boxed::Box;
     use core::error::Error;
     use core::future::Future;
     use core::marker::Send;
@@ -29,9 +18,9 @@ pub mod builder {
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use std::pin::Pin;
-    use tokio::sync::mpsc::{Receiver, UnboundedReceiver};
-    use crate::builder::internal::utils::box_err;
+
+
+    use tokio::sync::mpsc::error::TryRecvError;
 
     pub mod marker {
         #[derive(Default, Copy, Clone, Debug)]
@@ -63,12 +52,14 @@ pub mod builder {
 
     impl Crawler<NonAsync, NoContext> {
         pub fn new() -> Self {
+            //if there are diverging attributes for the Sync/Async versions later
             Self { ..Self::default() }
         }
     }
 
     impl Crawler<Async, NoContext> {
         pub fn new_async() -> Self {
+            //same as above
             Self { ..Self::default() }
         }
     }
@@ -137,6 +128,7 @@ pub mod builder {
         pub fn context<CNEW>(self, context: CNEW) -> Crawler<Async, CNEW> {
             self.context_(context)
         }
+
         pub async fn run<Fun, Fut, E>(
             self,
             action: Fun,
@@ -146,20 +138,55 @@ pub mod builder {
             Fun: Fn(Arc<C>, PathBuf) -> Fut + Send + 'static + Clone,
             Fut: Future<Output = Result<(), E>> + Send + 'static,
         {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
-                Pin<Box<dyn Future<Output = Result<(),Box<dyn Error + Send + 'static>>> + Send>>,
-            >();
-            let worker_handle = tokio::spawn(
-                async move |mut rx: UnboundedReceiver<Pin<Box<dyn Future<Output=Result<(),Box<dyn Error + Send + 'static>>> + Send>>>| -> Result<(), Box<dyn Error + Send + 'static>> {
-                    while let Some(task) = rx.recv().await {
-                        task.await?;
-                    }
 
-                    Ok::<(), Box<dyn Error + Send + 'static>>(())
-                }(rx),
-            );
-            use tracing::info;
-            info!("starting crawler");
+
+            let (task_authority_tx, mut task_authority_rx)=tokio::sync::mpsc::unbounded_channel::<Execute<E>>();
+
+            let task_authority=tokio::task::spawn_blocking(async move || -> Result<(), Box<dyn Error + Send + 'static>>{
+                let mut recursion_tasks=tokio::task::JoinSet::new();
+                let mut action_tasks=tokio::task::JoinSet::new();
+
+                loop {
+
+                    match task_authority_rx.try_recv() {
+                        Ok(signal) => {
+                            match signal {
+                            Execute::Recursion(task) => {
+                                drop(recursion_tasks.spawn(task))},
+                            Execute::Action(task) => drop(action_tasks.spawn(task)),
+                        }},
+                        Err(e) => match e {
+                            TryRecvError::Disconnected => { unreachable!("Senders shouldn't be dropped by now"); },
+                            //fall-through
+                            TryRecvError::Empty => {}
+                        }
+                    };
+                    match (recursion_tasks.is_empty(), action_tasks.is_empty()) {
+                        (true, true) => {
+                            break},
+                        (rec, act) => {
+                            if !rec {
+                                if let Some(result) = recursion_tasks.try_join_next() {
+                                    //unwrap to propagate panics
+                                    result.unwrap().map_err(box_err)?;
+                                }
+                            }
+                            if !act {
+                                if let Some(result) = action_tasks.try_join_next() {
+                                    //unwrap to propagate panics
+                                    result.unwrap().map_err(box_err)?;
+                                }
+                            }
+                        }
+                    }
+                }
+
+
+                Ok::<(), Box<dyn Error + Send + 'static>>(())
+            });
+
+
+
             let start_dir = match self.start_dir {
                 StartDir::Custom(path) => path,
                 StartDir::Current => match std::env::current_dir() {
@@ -177,60 +204,22 @@ pub mod builder {
                 file_regex: self.file_regex,
             };
 
-            {
-                /*let action_tasks: Arc<Mutex<JoinSet<Result<(), E>>>> =
-                    Arc::new(Mutex::new(JoinSet::new()));
-                let recursion_tasks: Arc<Mutex<JoinSet<Result<(), std::io::Error>>>> =
-                    Arc::new(Mutex::new(JoinSet::new()));*/
 
-                info!("set up joinsets");
-                tx.send(async_run(
-                    tx.clone(),
-                    action,
-                    Config {
-                        context: Arc::clone(&config.context),
-                        ..config
-                    },
-                )).map_err(box_err)?;
-                /*while let Some(task) = recursion_tasks.write().await.join_next().await {
-                    match task {
-                        Err(e) => panic!("A panic occurred during task execution: {}", e),
-                        Ok(result) => result?,
-                    };
-                }*/
-
-                //this works, but the version above not :/
-
-                /*loop {
-                    info!("loop (rt)");
-                    let task = match (*recursion_tasks).lock().unwrap().join_next() {
-                        Some(result) => match result {
-                            Ok(result) => result,
-                            Err(e) => return Err(Box::new(e) as Box<dyn Error + Send + 'static>),
+                task_authority_tx
+                    .send(Execute::Recursion(
+                          async_run(
+                              task_authority_tx.clone(),
+                        action,
+                        Config {
+                            context: Arc::clone(&config.context),
+                            ..config
                         },
-                        None => {
-                            info!("breaking out of the loop");
-                            break;
-                        }
-                    };
-                    match task {
-                        Err(e) => panic!("A panic occurred during task execution: {}", e),
-                        Ok(_) => continue,
-                    }
-                }
-                while let Some(task) = action_tasks.lock().unwrap().join_next().await {
-                    info!("action loop");
-                    match task {
-                        Err(e) => panic!("A panic occurred during task execution: {}", e),
-                        Ok(result) => match result {
-                            Ok(_) => {}
-                            Err(e) => panic!("An error occurred during execution: {}", e),
-                        },
-                    };
-                }*/
-                //JoinError and actual Error
-                worker_handle.await.map_err(box_err).unwrap()?;
-            }
+                    )))
+                    .expect("The Reveiver should not have been dropped by now");
+
+
+            task_authority.await.unwrap().await?;
+
             Ok(Arc::into_inner(config.context).unwrap_or_else(|| {
                 unreachable!("Every other clone of this Arc should have been dropped by now")
             }))
@@ -238,10 +227,19 @@ pub mod builder {
     }
     pub(in crate::builder) mod internal {
         pub(crate) mod utils {
-            use std::error::Error;
+            use std::{
+                error::Error,
+                pin::Pin
+            };
 
             pub(crate) fn box_err(error: impl Error + Send + 'static) -> Box<dyn Error + Send> {
                 Box::new(error)
+            }
+
+
+            pub(crate) enum Execute<E> {
+                Recursion(Pin<Box<dyn Future<Output=Result<(), std::io::Error>>+Send>>),
+                Action(Pin<Box<dyn Future<Output=Result<(), E>>+Send>>),
             }
         }
         pub(in crate::builder) mod config {
@@ -359,7 +357,6 @@ pub mod builder {
                             context: Arc::clone(&config.context),
                         };
                         par_run(action.clone(), config)?;
-                        //N drop?
                     }
                 } else {
                     if config.validate_file_regex(&path.to_string_lossy()) {
@@ -372,40 +369,48 @@ pub mod builder {
             Ok(config.context)
         }
 
-        use crate::builder::internal::config::Config;
-        use crate::builder::{Crawler, StartDir};
+        use crate::{
+            builder::{
+                internal::{
+                    utils::{box_err, Execute},
+                    config::Config
+                },
+                Crawler,
+                StartDir
+            }
+        };
         use ::regex::Regex;
-        use std::error::Error;
-        use std::path::{Path, PathBuf};
-        use std::pin::Pin;
-        use std::sync::Arc;
+        use std::{
+            error::Error,
+            path::{Path, PathBuf},
+            pin::Pin,
+            sync::Arc
+        };
         use tokio::sync::mpsc::UnboundedSender;
-        use tracing::info;
-        use crate::builder::internal::utils::box_err;
 
         pub(in crate::builder) fn async_run<Fun, Fut, E, C>(
-            worker: UnboundedSender<Pin<Box<dyn Future<Output = Result<(),Box<dyn Error + Send + 'static>>> + Send>>>,
+            authority_sender: UnboundedSender<Execute<E>>,
             action: Fun,
             config: Config<C>,
-        ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error + Send>>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<(), std::io::Error>> + Send>>
         where
             E: Send + 'static + Error,
             Fun: Fn(Arc<C>, PathBuf) -> Fut + Send + 'static + Clone,
             Fut: Future<Output = Result<(), E>> + Send + 'static,
             C: Send + Sync + 'static,
         {
-            info!("async run started!");
-            Box::pin( async move {
+            //not incrementing the recursion_counter, always incremented before async_run is spawned
+
+
+            Box::pin(async move {
                 //here, the Custom(_) invariant is important
-                let mut entries = tokio::fs::read_dir(&config.start_dir).await.map_err(box_err)?;
+                let mut entries = tokio::fs::read_dir(&config.start_dir).await?;
 
                 loop {
-                    info!("async_run loop");
-                    if let Some(entry) = entries.next_entry().await.map_err(box_err)? {
-                        info!("entry: {:?}", entry);
+
+                    if let Some(entry) = entries.next_entry().await? {
                         let path = entry.path();
                         if path.is_dir() && !matches!(config.max_depth, Some(0)) {
-                            info!("dir: {}", path.display());
                             if config.validate_folder_regex(&path.to_string_lossy()) {
                                 let config = Config {
                                     start_dir: path,
@@ -414,33 +419,36 @@ pub mod builder {
                                     file_regex: config.file_regex.clone(),
                                     folder_regex: config.folder_regex.clone(),
                                 };
-                                info!("regex valid");
-                                worker.send(Box::pin(
-                                    async_run::<
-                                    Fun,
-                                    Fut,
-                                    E,
-                                    C,
-                                >(
-                                    worker.clone(),
-                                    action.clone(),
-                                    config,
-                                ))).map_err(box_err)?;
-                                info!("task spawned!");
+                                authority_sender
+                                    .send(
+                                    Execute::Recursion(
+                                            Box::pin(
+                                                    async_run::<Fun, Fut, E, C>(
+                                                        authority_sender.clone(),
+                                                    action.clone(),
+                                                    config,
+                                                )
+                                            )
+                                        )
+                                    )
+                                    .expect("The Receiver should not have been dropped by now");
                             }
                         } else {
-                            info!("File: {}", path.display());
                             if config.validate_file_regex(&path.to_string_lossy()) {
-                                //same as above
-
-                                    worker.send(Box::pin(action.clone()(Arc::clone(&config.context), path))).map_err(box_err)?;
-
+                                authority_sender
+                                    .send(
+                                        Execute::Action(
+                                        Box::pin(action.clone()(
+                                        Arc::clone(&config.context),
+                                        path,
+                                    )))
+                                    )
+                                    .expect("The Receiver should not be dropped by now");
                             }
                         }
                         //saving the else branch
                         continue;
                     }
-                    info!("async run finished!");
                     break Ok(());
                 }
             })
@@ -448,31 +456,3 @@ pub mod builder {
     }
 }
 
-#[cfg(feature = "legacy")]
-pub mod legacy {
-    pub mod single_threaded {
-        use std::fs::ReadDir;
-        use std::path::{Path, PathBuf};
-        pub fn for_every_file<F>(start_dir: impl AsRef<Path>, mut action: F) -> anyhow::Result<()>
-        where
-            F: FnMut(PathBuf) -> anyhow::Result<()> + Clone,
-        {
-            let start_dir = start_dir.as_ref().to_path_buf();
-            let entries_result = std::fs::read_dir(&start_dir);
-            let entries: ReadDir = match entries_result {
-                Ok(entries) => entries,
-                Err(error) => return Err(anyhow::Error::from(error)),
-            };
-
-            for entry in entries.into_iter().filter_map(|entry| entry.ok()) {
-                if entry.path().is_dir() {
-                    for_every_file(entry.path(), action.clone())?;
-                } else {
-                    action(entry.path())?;
-                }
-            }
-
-            Ok(())
-        }
-    }
-}
