@@ -1,16 +1,132 @@
+//! A customisable, multithreaded (optionally async) file crawler for local file systems
+//! # Examples
+//! Below are some examples showing usage in different use cases. Reading these is is enough to understand everything for most use cases.
+//! While working with the library, it is recommended to refer to the [`Crawler`][crate::builder::Crawler] documentation.
+//! ### Example 1
+//! Creation of a synchronous, multithreaded crawler that prints the file name of every file in a folder:
+//! ```rust,ignore
+//! # fn main() -> Result<Box<dyn Error>> {
+//! use file_crawler::prelude::*;
+//! use std::path::PathBuf;
+//!
+//! Crawler::new()
+//!     .start_dir("C.\\user\\foo")
+//!     .run(|_:_, path: PathBuf| {
+//!         println!("{}", path.display());
+//!         Ok::<(),std::io::Error>(())
+//!     })?;
+//! # }
+//! ```
+//! ### Example 2
+//! Actually, we left one argument out: the [`Context`][crate::builder::Crawler::context]!
+//! We didn't need it, but if we want to know how many files we have in our folder we can do this:
+//! ```rust,ignore
+//! # fn main() -> Result<(), Box<dyn Error>> {
+//! use std::path::PathBuf;
+//! use std::sync::atomic::AtomicU32;
+//! use std::sync::{Arc, Mutex};
+//! use file_crawler::builder::Crawler;
+//!
+//! //the context is later returned as the exact same type from the Crawler::run function
+//! //so we can bind it to a variable if needed
+//! let count=
+//! Crawler::new()
+//!     .start_dir("C:\\user\\foo")
+//!     .context(Mutex::new(0))
+//!     .run(|ctx: Arc<Mutex<u32>>, path: PathBuf| {
+//!         ctx.lock().unwrap()+=1;
+//!         println!("{}", path.display())
+//!     })?;
+//!  println!("Total number of files in \"C\\user\\foo\": {}", count)
+//! # }
+//! ```
+//! ### Example 3
+//! Until now the `Ok()` was more mandatory than useful. Let's look at a use case where it is a big benefit,
+//! like counting the appearance of the letter 'a' (assuming only text files are in the folder)
+//! ```rust
+//! # fn main() -> Result<(), Box<dyn Error>> {
+//!  use std::fs::File;
+//!  use std::path::PathBuf;
+//!  use std::sync::Arc;
+//!  use std::sync::atomic::AtomicU32;
+//!  use file_crawler::builder::Crawler;
+//!
+//!  let a_count=
+//!  Crawler::new()
+//!     .start_dir("C\\user\\foo")
+//!     //you can of course use atomic types, this makes more sense for numbers
+//!     .context(AtomicU32)
+//!     .run(|ctx: Arc<AtomicU32>, path: PathBuf| {
+//!         let contents=String::new();
+//!         let file=File::open(path)?;
+//!         //NOTE: this can cause an error for files not readable as UTF-8
+//!         //which returns an error and therefore terminates the crawler
+//!         file.read_to_string(&mut contents)?;
+//!         contents.chars().for_each(|char| if char=='a' { ctx.fetch_add(1); });
+//!         Ok(())
+//!     })?;
+//!  println!("Appearance of the letter 'a' in \"C\\user\\foo\": {}", a_count)
+//! # }
+//! ```
+//! ### Example 4
+//! Say, you are looking all .txt files in a folder that's probably very big and deeply nested and
+//! don't want to use all the computation power and time that would potentially require:
+//! ```rust
+//! # fn main() -> Result<Box<dyn Error>> {
+//!  use std::path::PathBuf;
+//!  use file_crawler::builder::Crawler;
+//!
+//!  Crawler::new()
+//!     .start_dir("C\\user\\probably_very_deep_folder")
+//!     //you can set a regex for every file / folder
+//!     //the closure you specify is only executed for a file if its name matches the regex
+//!     //this regex matches every single-line string ending in ".txt"
+//!     .file_regex(r"^.*\.txt$")
+//!     //sets a maximum depth (in terms of "folder layers" over each other, 0 means it doesn't go into any subfolders)
+//!     .search_depth(3)
+//!     //you can also leave out the "PathBuf", before it was kept to make it easier to read
+//!     .run(|_: _, path| {
+//!         println!("{}", path.display());
+//!         Ok(())
+//!     })
+//! # }
+//! ```
+//! You can also set a folder regex via [`Crawler::folder_regex`][crate::builder::Crawler::folder_regex], checking for the file regex
+//! in the closure is possible, but in the future declaring it on the [`Crawler`][crate::builder::Crawler] may enable further optimisations
+//!
+//! ### Example 5
+//! Storing crawlers (lazyness)
+//!
+//! ### Example 6
+//! Like with iterators in rayon, you can simple exchange the [`Crawler::new`][crate::builder::Crawler::new] method with the [`Crawler::new_async`][crate::builder::Crawler::new_async]
+//! method to get an async crawler
+//!
+//! # Caveats
+//! Currently, the async version demands at least 2 thread tokio runtime. Running it in a single threaded runtime causes indefinite execution
+//!
+//! # TODO!!!
+//! - async feature!!!
+
+
 pub mod prelude;
 pub mod builder {
-
-    use crate::builder::context::NoContext;
-    use crate::builder::internal::config::Config;
-    use crate::builder::internal::utils::{box_err, Execute};
-    use crate::builder::{
-        internal::{async_run, par_run},
-        marker::{Async, NonAsync},
+    use crate::{
+        builder::{
+            internal::config::Config,
+            context::NoContext,
+            internal::utils::box_err,
+            internal::utils::Execute,
+            internal::async_run,
+            internal::par_run,
+            marker::Async,
+            marker::NonAsync
+        }
     };
-    use core::error::Error;
-    use core::future::Future;
-    use core::marker::Send;
+    use core::{
+        future::Future,
+        error::Error,
+        marker::Send
+    };
     use regex::Regex;
     use std::{
         fmt::Debug,
