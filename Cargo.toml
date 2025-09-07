@@ -1,19 +1,30 @@
 [package]
-name = "custom_file_crawler"
+name = "file-crawler"
 version = "0.1.0"
 edition = "2024"
 keywords = ["async", "fs", "crawler", "tokio", "rayon"]
 categories = ["concurrency"]
 license = "MIT"
-license-file = "LICENSE"
+authors = ["Jonathan Schmittat"]
+repository = "https://github.com/HQ2000-Rust/Custom-File-Crawler"
+readme = ""
 
 
 [dependencies]
-regex="1.11.2"
-tokio = { version = "1.47.1", features = ["sync", "fs","rt"] }
-rayon="1.11.0"
-
+regex = { version = "1.11.2"}
+tokio = { version = "1.47.1", features = ["sync", "fs","rt"] , optional = true }
+rayon = { version = "1.11.0" , optional = true }
 
 [features]
 
-default=[]
+default=["parallel"]
+
+parallel=["dep:rayon"]
+
+async=["dep:tokio"]
+
+lazy_store=[]
+
+[package.metadata.docs.rs]
+features = ["async"]
+rustdoc-args = ["--no-deps"]
