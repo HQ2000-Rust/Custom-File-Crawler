@@ -6,7 +6,7 @@
 //! # Examples
 //! Below are some examples showing usage in different use cases. Reading these is is enough to understand everything for most use cases.
 //! ### Example 1
-//! Creation of a synchronous, multithreaded `Crawler` that prints the file name of every file in a folder:
+//! Here's how you create a synchronous, multithreaded `Crawler` that prints the file name of every file in a folder:
 //! ```rust,ignore
 //! # fn main() -> Result<Box<dyn Error>> {
 //! use file_crawler::prelude::*;
@@ -226,7 +226,7 @@ pub mod builder {
         pub struct Async;
     }
     pub mod context {
-        #[derive(Debug, Copy, Clone, Default)]
+        #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct NoContext;
     }
 
@@ -238,7 +238,8 @@ pub mod builder {
     }
 
     ///The core of this library.
-    /// Create one with [`Crawler::new`][crate::builder::Crawler::new] or [`Crawler::new_async`][crate::builder::Crawler::new_async] to get started.
+    /// Create one with [`Crawler::new`][crate::builder::Crawler::new] or [`Crawler::new_async`][crate::builder::Crawler::new_async]
+    /// to get started. Also see the [examples][crate#Examples].
     #[derive(Debug, Clone, Default)]
     pub struct Crawler<A, C> {
         start_dir: StartDir,
@@ -249,48 +250,154 @@ pub mod builder {
         async_marker: PhantomData<A>,
     }
 
+
     #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
     impl Crawler<NonAsync, NoContext> {
+        ///Create a new non-async, parallel [`Crawler`] without any context
+        /// ```rust
+        /// # fn main() {
+        /// # use file_crawler::builder::Crawler;
+        /// let parallel_crawler=Crawler::new();
+        /// # }
+        /// ```
         pub fn new() -> Self {
             //if there are diverging attributes for the Sync/Async versions later
             Self { ..Self::default() }
         }
     }
 
-    #[cfg(any(feature = "async", feature = "lazy_store", doc))]
-    impl Crawler<Async, NoContext> {
-        pub fn new_async() -> Self {
-            //same as above
-            Self { ..Self::default() }
-        }
-    }
 
-    #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
+
+
+
     impl<C> Crawler<NonAsync, C>
     where
         C: Send + Sync,
     {
+        ///Sets the directory the crawler should start in. Default is the current directory, resolved when
+        ///[`Crawler::run`][crate::builder::Crawler::run] is called, if that fails, it panics before doing anything.
+        ///```rust
+        /// # fn main() -> Result<(),Box<dyn Error>> {
+        /// # use file_crawler::builder::Crawler;
+        /// use std::collections::HashSet;
+        /// use std::path::PathBuf;
+        /// use std::sync::Mutex;
+        ///
+        /// //Assuming that the content of C:\foo isn't changing during execution
+        /// //and this program is executed in that same folder
+        /// let crawler_1_result =
+        /// Crawler::new()
+        ///    .start_dir("C:\\foo")
+        ///    .context(Mutex::new(Vec::new()))
+        ///    .run(|ctx: Mutex<Vec<String>>, path| {
+        ///        ctx.lock().unwrap().insert(path.display());
+        ///    });
+        /// let crawler_2_result =
+        /// Crawler::new()
+        ///    .context(Mutex::new(Vec::new()))
+        ///    .run(|ctx: Mutex<HashSet<String>>, path| {
+        ///        ctx.lock().unwrap().insert(path.display());
+        ///    })?;
+        ///
+        /// //then (not guaranteed when using a Vec instead of a HashSet by design)
+        /// assert_eq!(crawler_1_result, crawler_2_result);
+        /// # }
+        /// ```
+        #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
         pub fn start_dir<P: AsRef<Path>>(self, path: P) -> Self {
             self.start_dir_(path.as_ref())
         }
+        ///Only applies the closure in [`run`][crate::builder::Crawler::run] to a file if the given regex matches
+        /// ```rust
+        /// # fn main() -> Result<(), Box<dyn Error>>{
+        /// # use file_crawler::builder::Crawler;
+        ///
+        /// //prints all text files in the current directory (and all its subfolders)
+        /// Crawler::new()
+        ///     .file_regex(r"^.*\.txt$")
+        ///     .run(|_, path| {
+        ///         println!("{}", path.display());
+        ///     })?;
+        /// # }
+        /// ```
+        #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
         pub fn file_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
             self.file_regex_(regex.as_ref())
         }
+        ///Only go into a folder if matches the given regex (meaning all files and subfolders etc. will not be traversed)
+        /// ```rust
+        /// //given this folder structure:
+        /// //foo
+        /// // |--bar
+        /// // |   |--foo.txt
+        /// // |--foobar
+        /// // |    |---barbar
+        /// // |           |---baz.txt
+        /// // |--foo
+        /// //     |--baz.txt
+        /// # fn main() -> Result<(), Box<dyn Error>>{
+        /// # use file_crawler::builder::Crawler;
+        ///
+        /// //this prints *only* baz.txt because the regex matches "foo", but not "bar" or "barbar" AND "foobar"
+        /// Crawler::new()
+        ///     .start_dir("path\\to\\foo")
+        ///     .folder_regex("foo")
+        ///     .run(|_, path| {
+        ///         println!("{}", path.display());
+        ///     })?;
+        /// # }
+        /// ```
+        #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
         pub fn folder_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
             self.folder_regex_(regex.as_ref())
         }
+        ///How deep (in terms of folder layers over each other) the [`Crawler`] should go
+        /// ```rust
+        /// # fn main() -> Result<(), Box<dyn Error>>{
+        /// # use file_crawler::builder::Crawler;
+        ///
+        /// //prints all text files in the current directory, but not its subfolders
+        /// Crawler::new()
+        ///     //exchanging the 0 with a 1 mean that it also traverses the subfolders, but not their subfolders
+        ///     .search_depth(0)
+        ///     .file_regex(r"^.*\.txt$")
+        ///     .run(|_, path| {
+        ///         println!("{}", path.display());
+        ///     })?;
+        /// # }
+        /// ```
+        #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
         pub fn search_depth(self, depth: u32) -> Self {
             self.search_depth_(depth)
         }
+        ///Adds a context ( = a value that is passed to the closure on every invocation via an [`Arc`]) with the type `CNEW`.
+        /// It is returned from the [`run`][crate::builder::Crawler::run] function after execution.
+        /// Defaults to the zero-sized [`NoContext`].
+        ///```rust
+        /// # fn main() -> Result<(), Box<dyn Error>>{
+        /// # use file_crawler::builder::Crawler;
+        /// use std::sync::atomic::AtomicU16;
+        ///
+        /// //bind the context to a variable
+        /// let result =
+        /// Crawler::new()
+        ///    //adds a counter (for everything not representable with Atomics, a Mutex is recommended)
+        ///     .context(AtomicU16::new(0))
+        ///     .run(|_, path| {
+        ///         println!("{}", path.display());
+        ///     })?;
+        /// println!("{} files in the current directory")
+        /// # }
+        /// ```
+        #[cfg(any(feature = "parallel", feature = "lazy_store", doc))]
         pub fn context<CNEW: Send + Sync>(self, context: CNEW) -> Crawler<NonAsync, CNEW> {
             self.context_(context)
         }
-    }
-    #[cfg(any(feature = "parallel", doc))]
-    impl<C> Crawler<NonAsync, C>
-    where
-        C: Send + Sync,
-    {
+
+        ///Runs the (modified) Crawler returned from [`Crawler::new`][crate::builder::Crawler::new], execution a closure that's passed
+        ///a [`Context`][crate::builder::Crawler::context] and the path of the file for every file in the specified directory. For exceptions,
+        ///see [`search_depth`][crate::builder::Crawler::search_depth], [`file_regex`][crate::builder::Crawler::file_regex] and [`folder_regex`][crate::builder::Crawler::folder_regex].
+        #[cfg(any(feature = "parallel", doc))]
         pub fn run<A, E>(self, action: A) -> Result<C, Box<dyn Error + Send + 'static>>
         where
             A: FnMut(Arc<C>, PathBuf) -> Result<(), E> + Clone + Send + Sync,
@@ -314,33 +421,57 @@ pub mod builder {
             Ok(Arc::into_inner(result).expect("Every other Arc should have been dropped by now"))
         }
     }
+
+    ///
     #[cfg(any(feature = "async", feature = "lazy_store", doc))]
-    impl<C> Crawler<Async, C>
-    where
-        C: Send + Sync + 'static,
-    {
-        pub fn start_dir<P: AsRef<Path>>(self, path: P) -> Self {
-            self.start_dir_(path.as_ref())
-        }
-        pub fn file_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
-            self.file_regex_(regex.as_ref())
-        }
-        pub fn folder_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
-            self.folder_regex_(regex.as_ref())
-        }
-        pub fn search_depth(self, depth: u32) -> Self {
-            self.search_depth_(depth)
-        }
-        pub fn context<CNEW: Send + Sync + 'static>(self, context: CNEW) -> Crawler<Async, CNEW> {
-            self.context_(context)
+    impl Crawler<Async, NoContext> {
+        ///Create a new async (parallel)[^async_disclaimer] [`Crawler`] without any context
+        /// ```rust
+        /// # fn main() {
+        /// # use file_crawler::builder::Crawler;
+        /// let async_crawler=Crawler::new_async();
+        /// # }
+        /// ```
+        pub fn new_async() -> Self {
+            //same as above
+            Self { ..Self::default() }
         }
     }
 
-    #[cfg(any(feature = "async", doc))]
+
     impl<C> Crawler<Async, C>
     where
         C: Send + Sync + 'static,
     {
+        /// See [`Crawler::search_depth`][crate::builder::Crawler::start_dir].
+        #[cfg(any(feature = "async", feature = "lazy_store", doc))]
+        pub fn start_dir<P: AsRef<Path>>(self, path: P) -> Self {
+            self.start_dir_(path.as_ref())
+        }
+        /// See [`Crawler::file_regex`][crate::builder::Crawler::file_regex].
+        #[cfg(any(feature = "async", feature = "lazy_store", doc))]
+        pub fn file_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
+            self.file_regex_(regex.as_ref())
+        }
+        /// See [`Crawler::folder_regex`][crate::builder::Crawler::folder_regex].
+        #[cfg(any(feature = "async", feature = "lazy_store", doc))]
+        pub fn folder_regex<STR: AsRef<str>>(self, regex: STR) -> Self {
+            self.folder_regex_(regex.as_ref())
+        }
+        /// See [`Crawler::search_depth`][crate::builder::Crawler::search_depth].
+        #[cfg(any(feature = "async", feature = "lazy_store", doc))]
+        pub fn search_depth(self, depth: u32) -> Self {
+            self.search_depth_(depth)
+        }
+        /// See [`Crawler::context`][crate::builder::Crawler::context].
+        #[cfg(any(feature = "async", feature = "lazy_store", doc))]
+        pub fn context<CNEW: Send + Sync + 'static>(self, context: CNEW) -> Crawler<Async, CNEW> {
+            self.context_(context)
+        }
+        ///Runs a (modified) asynchronous file crawler from [`Crawler::new_async`][crate::builder::Crawler::new_async] using [`tokio`](https://crates.io/crates/tokio).
+        ///Requires an at least two-threaded runtime ([3][crate#fnref3]).
+        ///Otherwise, the same as the synchronous version.
+        #[cfg(any(feature = "async", doc))]
         pub async fn run<Fun, Fut, E>(
             self,
             action: Fun,
