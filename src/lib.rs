@@ -1,7 +1,17 @@
 //! A customisable, multithreaded (optionally async) file crawler for local file systems
 //! # Getting Started
-//! It is recommended to just `cargo add file-crawler` it to your project and read the examples (or the [`Crawler`][crate::builder::Crawler] docs)!
-//! While working with the library, refer to the `Crawler` documentation.
+//! It is recommended to
+//! - add it to your project
+//! ```text
+//! cargo add file-crawler
+//! ```
+//! - use the prelude
+//! ```rust
+//! use file_crawler::prelude::*;
+//! ```
+//! - and read the examples (or the [`Crawler`][crate::builder::Crawler] docs)!
+//!
+//! - While working with the library, refer to the `Crawler` documentation.
 //!
 //! # Examples
 //! Below are some examples showing usage in different use cases. Reading these is is enough to understand everything for most use cases.
@@ -190,6 +200,7 @@
 //! [^regex_compile_disclaimer]: one exception is setting a regex because it is compiled on setting it to emit an early panic.
 
 pub mod prelude;
+/// Building the crawler via the builder pattern, only way as of now
 pub mod builder {
     use crate::builder::{
         context::NoContext,
@@ -217,6 +228,7 @@ pub mod builder {
     #[cfg(any(feature = "async", doc))]
     use tokio::sync::mpsc::error::TryRecvError;
 
+    ///"Asyncness" markers. They do nothing.
     pub mod marker {
         #[cfg(any(feature = "parallel", feature = "lazy_store",doc))]
         #[derive(Default, Copy, Clone, Debug)]
@@ -225,6 +237,7 @@ pub mod builder {
         #[derive(Default, Copy, Clone, Debug)]
         pub struct Async;
     }
+    /// [`NoContext`] placeholder
     pub mod context {
         #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct NoContext;
