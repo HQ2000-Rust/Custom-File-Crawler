@@ -1,6 +1,6 @@
 # Custom-File-Crawler - a fast, concurrent, customisable and fully documented file crawler!
 Features:
-- fully multithreaded by default (2x - x speedup)
+- fully multithreaded by default (2x - 3x speedup)
 - Two options:
   - async
   - non-async
