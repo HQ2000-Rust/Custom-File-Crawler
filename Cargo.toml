@@ -7,7 +7,8 @@ categories = ["concurrency"]
 license = "MIT"
 authors = ["Jonathan Schmittat"]
 repository = "https://github.com/HQ2000-Rust/Custom-File-Crawler"
-readme = ""
+readme = "README.md"
+description = "A fast, concurrent, async and customisable file crawler"
 
 
 [dependencies]
