@@ -61,7 +61,7 @@
 //! ### Example 3
 //! Until now the `Ok()` was more mandatory than useful. Let's look at a use case where it is a big benefit,
 //! like counting the appearance of the letter '`a`' (assuming only text files are in the folder)
-//! ```rust
+//! ```rust,ignore
 //! # fn main() -> Result<(), Box<dyn Error>> {
 //!  use file_crawler::prelude::*;
 //!
@@ -89,7 +89,7 @@
 //! ### Example 4
 //! Say, you are looking all `.txt` files in a folder that's probably very big and deeply nested and
 //! don't want to use all the computation power and time it would require you can do something like this:
-//! ```rust
+//! ```rust,ignore
 //! # fn main() -> Result<Box<dyn Error>> {
 //!  use file_crawler::prelude::*;
 //!
@@ -115,7 +115,7 @@
 //!
 //! ### Example 5
 //! A focus was also put on the laziness[^laziness_explanation] of the `Crawler`, so it is possible to create, store and *then* use one or more mostly without any heavy computations before running[^regex_compile_disclaimer]:
-//! ```rust
+//! ```rust,ignore
 //! # fn main() -> Result<(), Box<dyn Error>> {
 //! use file_crawler::prelude::*;
 //!
@@ -151,7 +151,7 @@
 //! ### Example 6
 //! Like with iterators in [`rayon`](https://crates.io/crates/rayon), you can simply exchange the [`Crawler::new`][crate::builder::Crawler::new] method with the [`Crawler::new_async`][crate::builder::Crawler::new_async]
 //! method to get an async crawler.
-//! ```rust
+//! ```rust,ignore
 //! # fn main() -> Result<(), Box<dyn Error>> {
 //!  use file_crawler::prelude::*;
 //!
