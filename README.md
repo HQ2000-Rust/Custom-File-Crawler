@@ -9,7 +9,7 @@ Features:
 - lazyness (see lazy evaluation)
 - execution a closure for every file (in the defined scope)
 - having persistent data across closure invocations
--  set start directory)
+- (set start directory)
 
 ## Examples
 I've made some examples, they're a [here]() and will be added to the repo soon too
