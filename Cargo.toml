@@ -1,6 +1,6 @@
 [package]
 name = "file-crawler"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 keywords = ["async", "fs", "crawler", "tokio", "rayon"]
 categories = ["concurrency"]
