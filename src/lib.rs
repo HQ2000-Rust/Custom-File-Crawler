@@ -206,9 +206,9 @@ pub mod builder {
         context::NoContext,
         internal::{config::Config, utils::box_err},
     };
-    #[cfg(any(feature = "parallel", doc))]
+    #[cfg(any(feature = "parallel", feature= "lazy_store", doc))]
     use crate::builder::{internal::par_run, marker::NonAsync};
-    #[cfg(any(feature = "async", doc))]
+    #[cfg(any(feature = "async", feature = "lazy_store", doc))]
     use crate::builder::{
         internal::{async_run, utils::Execute},
         marker::Async,
@@ -289,7 +289,7 @@ pub mod builder {
     {
         ///Sets the directory the crawler should start in. Default is the current directory, resolved when
         ///[`Crawler::run`][crate::builder::Crawler::run] is called, if that fails, it panics before doing anything.
-        ///```rust
+        ///```rust,ignore
         /// # fn main() -> Result<(),Box<dyn Error>> {
         /// # use file_crawler::builder::Crawler;
         /// use std::collections::HashSet;
@@ -321,7 +321,7 @@ pub mod builder {
             self.start_dir_(path.as_ref())
         }
         ///Only applies the closure in [`run`][crate::builder::Crawler::run] to a file if the given regex matches
-        /// ```rust
+        /// ```rust,ignore
         /// # fn main() -> Result<(), Box<dyn Error>>{
         /// # use file_crawler::builder::Crawler;
         ///
@@ -338,7 +338,7 @@ pub mod builder {
             self.file_regex_(regex.as_ref())
         }
         ///Only go into a folder if matches the given regex (meaning all files and subfolders etc. will not be traversed)
-        /// ```rust
+        /// ```rust,ignore
         /// //given this folder structure:
         /// //foo
         /// // |--bar
@@ -410,6 +410,22 @@ pub mod builder {
         ///Runs the (modified) Crawler returned from [`Crawler::new`][crate::builder::Crawler::new], execution a closure that's passed
         ///a [`Context`][crate::builder::Crawler::context] and the path of the file for every file in the specified directory. For exceptions,
         ///see [`search_depth`][crate::builder::Crawler::search_depth], [`file_regex`][crate::builder::Crawler::file_regex] and [`folder_regex`][crate::builder::Crawler::folder_regex].
+        /// ```rust,ignore
+        /// # fn main() -> Result<Box<dyn Error>> {
+        ///  use file_crawler::prelude::*;
+        ///
+        ///  use std::path::PathBuf;
+        ///
+        ///  Crawler::new()
+        ///     .start_dir("C\\user\\foo")
+        ///     .file_regex(r"^.*\.txt$")
+        ///     .search_depth(3)
+        ///     .run(|_, path| {
+        ///         println!("{}", path.display());
+        ///         Ok(())
+        ///     })?;
+        /// # }
+        /// ```
         #[cfg(any(feature = "parallel", doc))]
         pub fn run<A, E>(self, action: A) -> Result<C, Box<dyn Error + Send + 'static>>
         where
@@ -435,12 +451,12 @@ pub mod builder {
         }
     }
 
-    ///
     #[cfg(any(feature = "async", feature = "lazy_store", doc))]
     impl Crawler<Async, NoContext> {
         ///Create a new async (parallel)[^async_disclaimer] [`Crawler`] without any context
         /// ```rust
-        /// # fn main() {
+        /// # #[tokio::main]
+        /// # async fn main() {
         /// # use file_crawler::builder::Crawler;
         /// let async_crawler=Crawler::new_async();
         /// # }
@@ -450,7 +466,6 @@ pub mod builder {
             Self { ..Self::default() }
         }
     }
-
 
     impl<C> Crawler<Async, C>
     where
@@ -483,7 +498,24 @@ pub mod builder {
         }
         ///Runs a (modified) asynchronous file crawler from [`Crawler::new_async`][crate::builder::Crawler::new_async] using [`tokio`](https://crates.io/crates/tokio).
         ///Requires an at least two-threaded runtime ([3][crate#fnref3]).
-        ///Otherwise, the same as the synchronous version.
+        ///Otherwise, the same as the synchronous version. It is recommended to use the exposed `tokio` (through the `prelude`) dependency instead of `std` when possible.
+        /// ```rust,ignore
+        /// # fn main() -> Result<Box<dyn Error>> {
+        ///  use file_crawler::prelude::*;
+        ///
+        ///  use std::path::PathBuf;
+        ///
+        ///  Crawler::new()
+        ///     .start_dir("C\\user\\foo")
+        ///     .file_regex(r"^.*\.txt$")
+        ///     .run(|_, path| {
+        ///         let contents=String::new();
+        ///         let file=tokio::fs::File::open(&path).await?;
+        ///         file.read_to_string(&mut contents).await?;
+        ///         println!("{}:\n{}", path.display(), contents);
+        ///         Ok(())
+        ///     })?;
+        /// # }
         #[cfg(any(feature = "async", doc))]
         pub async fn run<Fun, Fut, E>(
             self,
