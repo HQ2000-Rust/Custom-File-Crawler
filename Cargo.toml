@@ -26,5 +26,5 @@ async=["dep:tokio"]
 lazy_store=[]
 
 [package.metadata.docs.rs]
-features = ["async"]
+all-features = true
 rustdoc-args = ["--no-deps"]
