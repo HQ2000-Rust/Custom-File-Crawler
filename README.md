@@ -1,5 +1,5 @@
-> [**example video**](https://streamable.com/ujk7hd)
-> crates.io link: <https://crates.io/crates/file-crawler>
+> - [**example video**](https://streamable.com/ujk7hd)
+> - crates.io link: <https://crates.io/crates/file-crawler>
 # A fast, concurrent, customisable, optionally async and fully documented file crawler!
 Features:
 - fully multithreaded by default (**more than 2 times faster**, depending)
